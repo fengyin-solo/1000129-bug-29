@@ -39,14 +39,16 @@
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
           <td class="row-actions">
             <button
-              v-for="action in actions"
+              v-for="action in availableActions(row)"
               :key="action"
               class="link"
               type="button"
+              :disabled="acting"
               @click="runAction(action, row)"
             >
               {{ action }}
             </button>
+            <span v-if="!availableActions(row).length" class="empty-state">无可用动作</span>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -72,14 +74,26 @@ type Row = Record<string, string | number | null>
 const ENDPOINT = '/api/inbound'
 const columns = ["入库单号", "供应商名称", "货物名称", "批次号", "入库数量", "到货温度", "收货人", "入库时间"]
 const actions = ["确认收货", "安排上架", "退回入库"]
+// 与后端 ACTION_SOURCES 保持一致：每个动作只允许从特定状态发起，已退回是终态
+const actionSources: Record<string, string[]> = {
+  确认收货: ['待收货'],
+  安排上架: ['已收货'],
+  退回入库: ['待收货', '已收货', '已上架'],
+}
 const statuses = ["待收货", "已收货", "已上架", "已退回"]
 const stats = [{"label": "今日入库单", "value": 0}, {"label": "待上架单", "value": 0}, {"label": "到货温度不达标", "value": 0}]
 
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const acting = ref(false)
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+
+function availableActions(row: Row) {
+  const status = String(row.status ?? '')
+  return actions.filter((action) => actionSources[action]?.includes(status))
+}
 
 function resetFilters() {
   filters.value = {}
@@ -95,18 +109,38 @@ function openCreate() {
 }
 
 async function runAction(action: string, row: Row) {
+  if (acting.value) {
+    return
+  }
   errorMessage.value = ''
+  const values: Record<string, string> = { action }
+  if (action === '确认收货') {
+    const temperature = window.prompt('请确认到货温度', String(row['到货温度'] ?? ''))
+    if (temperature === null) {
+      return
+    }
+    if (temperature.trim()) {
+      values['到货温度'] = temperature.trim()
+    }
+  }
+  acting.value = true
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values }),
     })
+    const result = await response.json().catch(() => null)
     if (!response.ok) {
-      throw new Error('入库管理动作未生效，请稍后重试')
+      throw new Error(result?.detail ?? '入库管理动作未生效，请稍后重试')
+    }
+    if (!result?.ok) {
+      throw new Error(result?.message ?? '入库管理动作未生效，请稍后重试')
     }
     await reload()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '入库管理操作失败'
+  } finally {
+    acting.value = false
   }
 }
 
