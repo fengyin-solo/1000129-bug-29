@@ -50,9 +50,14 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条入库单执行确认收货、安排上架、退回入库；不允许的动作会被拦下并说明原因。"""
+    """对单条入库单执行确认收货、安排上架、退回入库。
+
+    状态不对、字段缺失等业务失败会以 ok=false 返回，并在 message 里说明原因，
+    后端不会做任何写回，保证列表页与详情页看到的结果一致。
+    """
     action = str(payload.values.get("action") or "").strip()
-    entry, message = service.run_action(entry_id, action)
+    values = {key: value for key, value in payload.values.items() if key != "action"}
+    entry, message = service.run_action(entry_id, action, values)
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)

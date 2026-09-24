@@ -30,7 +30,7 @@
     <table class="data-table">
       <thead>
         <tr>
-          <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th v-for="column in columns" :key="column">{{ columnLabels[column] ?? column }}</th>
           <th>可执行动作</th>
         </tr>
       </thead>
@@ -38,15 +38,17 @@
         <tr v-for="row in rows" :key="String(row.id)">
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
           <td class="row-actions">
-            <button
-              v-for="action in actions"
-              :key="action"
-              class="link"
-              type="button"
-              @click="runAction(action, row)"
-            >
-              {{ action }}
-            </button>
+            <template v-for="action in actionsFor(row)" :key="action">
+              <button
+                class="link"
+                type="button"
+                :disabled="busyKey === `${action}-${String(row.id)}`"
+                @click="runAction(action, row)"
+              >
+                {{ busyKey === `${action}-${String(row.id)}` ? '提交中…' : action }}
+              </button>
+            </template>
+            <span v-if="!actionsFor(row).length" class="muted-text">—</span>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -57,6 +59,7 @@
 
     <footer class="page-foot">
       <span>共 {{ total }} 条入库管理记录</span>
+      <span v-if="successMessage" class="success-text">{{ successMessage }}</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
@@ -70,16 +73,29 @@ import { request } from '@/api/client'
 type Row = Record<string, string | number | null>
 
 const ENDPOINT = '/api/inbound'
-const columns = ["入库单号", "供应商名称", "货物名称", "批次号", "入库数量", "到货温度", "收货人", "入库时间"]
-const actions = ["确认收货", "安排上架", "退回入库"]
-const statuses = ["待收货", "已收货", "已上架", "已退回"]
+const columns = ["入库单号", "供应商名称", "货物名称", "批次号", "入库数量", "到货温度", "收货人", "入库时间", "status"]
+const columnLabels: Record<string, string> = { status: '状态' }
 const stats = [{"label": "今日入库单", "value": 0}, {"label": "待上架单", "value": 0}, {"label": "到货温度不达标", "value": 0}]
 
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const successMessage = ref('')
+const busyKey = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+
+// 各状态允许的动作必须与后端状态机一致，避免点了才被告知不允许。
+const ACTIONS_BY_STATUS: Record<string, string[]> = {
+  '待收货': ['确认收货', '退回入库'],
+  '已收货': ['安排上架', '退回入库'],
+  '已上架': ['退回入库'],
+  '已退回': [],
+}
+
+function actionsFor(row: Row): string[] {
+  return ACTIONS_BY_STATUS[String(row.status ?? '')] ?? []
+}
 
 function resetFilters() {
   filters.value = {}
@@ -96,17 +112,51 @@ function openCreate() {
 
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
+  successMessage.value = ''
+  const values: Record<string, string> = { action }
+  if (action === '确认收货') {
+    // 列表上没留到货温度时，收货环节必须补录，否则后端会拒绝写回。
+    const existing = String(row['到货温度'] ?? '').trim()
+    const temperature = window.prompt('请输入到货温度（℃，冷链常规区间 -30 ~ -5）', existing)
+    if (temperature === null) {
+      return
+    }
+    const trimmed = temperature.trim()
+    if (!trimmed) {
+      errorMessage.value = '确认收货失败：未填到货温度，收货记录无法写回'
+      return
+    }
+    values['到货温度'] = trimmed
+  }
+  const key = `${action}-${String(row.id)}`
+  busyKey.value = key
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values }),
     })
-    if (!response.ok) {
-      throw new Error('入库管理动作未生效，请稍后重试')
+    let payload: { ok?: boolean; message?: string } | null = null
+    try {
+      payload = await response.json()
+    } catch {
+      payload = null
     }
+    if (!response.ok) {
+      const detail = payload && typeof payload === 'object' && 'message' in payload
+        ? String(payload.message)
+        : '入库管理动作未生效，请稍后重试'
+      throw new Error(detail)
+    }
+    // 后端对状态不对、字段缺失等业务失败返回 ok=false，必须把说明展示出来。
+    if (!payload || payload.ok === false) {
+      throw new Error(payload?.message || '入库管理动作未生效，请稍后重试')
+    }
+    successMessage.value = payload.message || '操作成功'
     await reload()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '入库管理操作失败'
+  } finally {
+    busyKey.value = ''
   }
 }
 
